@@ -309,7 +309,6 @@
         return new Promise((resolve, reject) => {
             const iframe = document.createElement("iframe");
             iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1280px;height:720px;border:none;visibility:hidden;";
-            iframe.sandbox = "allow-scripts allow-same-origin";
 
             const timeout = setTimeout(() => {
                 if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
