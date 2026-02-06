@@ -294,8 +294,64 @@
         return;
     }
 
-    // --- Step 3: Download all transcripts ---
-    console.log("Step 3: Downloading transcripts...\n");
+    // --- Step 3: Download all transcripts using hidden iframes ---
+    // fetch() + DOMParser doesn't run JavaScript, so dynamically-loaded
+    // transcript content is empty. Iframes load the full page with JS execution.
+    console.log("Step 3: Downloading transcripts (via iframe for JS rendering)...\n");
+
+    const IFRAME_LOAD_TIMEOUT = 30000;  // max wait for iframe to load
+    const TRANSCRIPT_POLL_INTERVAL = 500;  // check every 500ms for transcript
+    const TRANSCRIPT_MAX_WAIT = 15000;  // max wait for transcript to appear after load
+
+    // Load a page in a hidden iframe (runs JS, so dynamic content renders).
+    // Returns { iframe, doc } - caller MUST remove iframe after use.
+    function loadPageInIframe(url) {
+        return new Promise((resolve, reject) => {
+            const iframe = document.createElement("iframe");
+            iframe.style.cssText = "position:fixed;top:-9999px;left:-9999px;width:1280px;height:720px;border:none;visibility:hidden;";
+            iframe.sandbox = "allow-scripts allow-same-origin";
+
+            const timeout = setTimeout(() => {
+                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                reject(new Error("Iframe load timeout"));
+            }, IFRAME_LOAD_TIMEOUT);
+
+            iframe.onload = async () => {
+                clearTimeout(timeout);
+                try {
+                    // Poll until the transcript content appears (dynamically loaded by JS)
+                    const startWait = Date.now();
+                    while (Date.now() - startWait < TRANSCRIPT_MAX_WAIT) {
+                        try {
+                            const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                            const el = iframeDoc.querySelector("#transcript-ShoudTranscript .transcript__wrapper");
+                            if (el && el.textContent.trim().length > 100) break;
+                        } catch (e) {
+                            if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                            reject(new Error("Cannot access iframe content: " + e.message));
+                            return;
+                        }
+                        await delay(TRANSCRIPT_POLL_INTERVAL);
+                    }
+                    // Resolve with iframe still attached (caller removes it after extraction)
+                    const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                    resolve({ iframe, doc: iframeDoc });
+                } catch (e) {
+                    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                    reject(e);
+                }
+            };
+
+            iframe.onerror = () => {
+                clearTimeout(timeout);
+                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                reject(new Error("Iframe failed to load"));
+            };
+
+            document.body.appendChild(iframe);
+            iframe.src = url;
+        });
+    }
 
     const zip = new SimpleZip();
     let downloaded = 0;
@@ -307,43 +363,45 @@
         const progress = `[${i + 1}/${allShouds.length}]`;
         console.log(`${progress} ${item.seriesName} / ${item.shoudName}`);
 
-        const html = await fetchPage(item.url);
-        if (!html) {
-            console.warn(`${progress}   FAILED to fetch`);
-            failed++;
-            failedUrls.push(item.url);
-            await delay(DELAY_BETWEEN_SHOUDS);
-            continue;
-        }
+        let iframeRef = null;
+        try {
+            const { iframe, doc: iframeDoc } = await loadPageInIframe(item.url);
+            iframeRef = iframe;
+            const transcriptEl = iframeDoc.querySelector("#transcript-ShoudTranscript .transcript__wrapper");
 
-        const doc = parseHTML(html);
-        const transcriptEl = doc.querySelector("#transcript-ShoudTranscript .transcript__wrapper");
+            if (transcriptEl) {
+                const text = cleanText(transcriptEl);
 
-        if (transcriptEl) {
-            const text = cleanText(transcriptEl);
+                if (text.length > 200) {
+                    const header = [
+                        `Title: ${item.shoudName}`,
+                        `Series: ${item.seriesName}`,
+                        `Source: ${item.url}`,
+                        "=".repeat(60),
+                        "",
+                        "",
+                    ].join("\n");
 
-            if (text.length > 200) {
-                const header = [
-                    `Title: ${item.shoudName}`,
-                    `Series: ${item.seriesName}`,
-                    `Source: ${item.url}`,
-                    "=".repeat(60),
-                    "",
-                    "",
-                ].join("\n");
-
-                zip.addFile(`${item.seriesSlug}/${item.shoudSlug}.txt`, header + text);
-                downloaded++;
-                console.log(`${progress}   Saved (${text.length.toLocaleString()} chars)`);
+                    zip.addFile(`${item.seriesSlug}/${item.shoudSlug}.txt`, header + text);
+                    downloaded++;
+                    console.log(`${progress}   Saved (${text.length.toLocaleString()} chars)`);
+                } else {
+                    console.warn(`${progress}   Transcript too short (${text.length} chars)`);
+                    failed++;
+                    failedUrls.push(item.url);
+                }
             } else {
-                console.warn(`${progress}   Transcript too short (${text.length} chars)`);
+                console.warn(`${progress}   No transcript element found`);
                 failed++;
                 failedUrls.push(item.url);
             }
-        } else {
-            console.warn(`${progress}   No #transcript-ShoudTranscript found`);
+        } catch (e) {
+            console.warn(`${progress}   FAILED: ${e.message}`);
             failed++;
             failedUrls.push(item.url);
+        } finally {
+            // Always clean up the iframe after text extraction
+            if (iframeRef && iframeRef.parentNode) iframeRef.parentNode.removeChild(iframeRef);
         }
 
         await delay(DELAY_BETWEEN_SHOUDS);
