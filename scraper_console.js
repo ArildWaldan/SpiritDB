@@ -317,7 +317,7 @@
         }
 
         const doc = parseHTML(html);
-        const transcriptEl = doc.querySelector("#transcript-ShoudTranscript");
+        const transcriptEl = doc.querySelector("#transcript-ShoudTranscript .transcript__wrapper");
 
         if (transcriptEl) {
             const text = cleanText(transcriptEl);
